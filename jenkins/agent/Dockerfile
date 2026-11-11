@@ -1,6 +1,6 @@
 FROM node:24-bookworm-slim AS node
 
-FROM jenkins/inbound-agent:latest-jdk17
+FROM jenkins/inbound-agent:latest-jdk21
 
 USER root
 RUN apt-get update \
@@ -11,7 +11,7 @@ RUN apt-get update \
     && . /etc/os-release \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends docker-ce-cli \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
