@@ -1,0 +1,238 @@
+name: taskflow
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-taskflow_root_dev_password}
+      TASKFLOW_DB_USER: ${TASKFLOW_DB_USER:-taskflow_app}
+      TASKFLOW_DB_PASSWORD: ${TASKFLOW_DB_PASSWORD:-taskflow_dev_password}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - taskflow
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mysql --protocol=socket -uroot --password="$${MYSQL_ROOT_PASSWORD}"
+          --silent --skip-column-names
+          -e "SELECT COUNT(*) FROM information_schema.schemata
+          WHERE schema_name IN ('taskflow_users','taskflow_tasks')"
+          | grep -q '^2$$'
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  eureka-server:
+    image: taskflow/eureka-server:1.0.0
+    build:
+      context: ./eureka-server
+      dockerfile: Dockerfile
+    environment:
+      SERVER_ADDRESS: 0.0.0.0
+      EUREKA_CLIENT_REGISTER_WITH_EUREKA: "false"
+      EUREKA_CLIENT_FETCH_REGISTRY: "false"
+    ports:
+      - "8761:8761"
+    networks:
+      - taskflow
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8761/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+    restart: on-failure
+
+  user-service:
+    image: taskflow/user-service:1.0.0
+    build:
+      context: ./user-service
+      dockerfile: Dockerfile
+    environment: &spring-service-env
+      SERVER_ADDRESS: 0.0.0.0
+      EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: user-service
+      EUREKA_INSTANCE_PREFER_IP_ADDRESS: "false"
+      DB_URL: jdbc:mysql://mysql:3306/taskflow_users?serverTimezone=UTC&connectTimeout=10000&socketTimeout=30000
+      DB_USERNAME: ${TASKFLOW_DB_USER:-taskflow_app}
+      DB_PASSWORD: ${TASKFLOW_DB_PASSWORD:-taskflow_dev_password}
+      JWT_SECRET_BASE64: ${JWT_SECRET_BASE64:-VGhpc0lzQURldk9ubHlTZWNyZXRLZXlGb3JUYXNrRmxvdw==}
+      JWT_EXPIRATION_SECONDS: ${JWT_EXPIRATION_SECONDS:-3600}
+      JWT_COOKIE_SECURE: ${JWT_COOKIE_SECURE:-false}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+    networks:
+      - taskflow
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8081/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    restart: on-failure
+
+  task-service:
+    image: taskflow/task-service:1.0.0
+    build:
+      context: ./task-service
+      dockerfile: Dockerfile
+    environment:
+      <<: *spring-service-env
+      EUREKA_INSTANCE_HOSTNAME: task-service
+      DB_URL: jdbc:mysql://mysql:3306/taskflow_tasks?serverTimezone=UTC&connectTimeout=10000&socketTimeout=30000
+    depends_on:
+      mysql:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+    networks:
+      - taskflow
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8082/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    restart: on-failure
+
+  api-gateway:
+    image: taskflow/api-gateway:1.0.0
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    environment:
+      SERVER_ADDRESS: 0.0.0.0
+      EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: api-gateway
+      EUREKA_INSTANCE_PREFER_IP_ADDRESS: "false"
+      JWT_SECRET_BASE64: ${JWT_SECRET_BASE64:-VGhpc0lzQURldk9ubHlTZWNyZXRLZXlGb3JUYXNrRmxvdw==}
+      FRONTEND_ORIGIN: http://localhost
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      task-service:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    networks:
+      - taskflow
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8080/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    restart: on-failure
+
+  frontend:
+    image: taskflow/frontend:1.0.0
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    networks:
+      - taskflow
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: on-failure
+
+  jenkins:
+    image: taskflow/jenkins-controller:lts-jdk21
+    build:
+      context: ./jenkins/controller
+      dockerfile: Dockerfile
+    profiles: ["ci"]
+    environment:
+      JENKINS_OPTS: --httpPort=8080
+    ports:
+      - "8085:8080"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+    networks:
+      - taskflow
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8080/login || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+    restart: unless-stopped
+
+  docker-dind:
+    image: docker:dind
+    profiles: ["ci"]
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: /certs
+    volumes:
+      - jenkins_docker_certs:/certs/client
+      - jenkins_dind_data:/var/lib/docker
+    networks:
+      taskflow:
+        aliases:
+          - docker
+    healthcheck:
+      test: ["CMD-SHELL", "docker info > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  jenkins-agent:
+    image: taskflow/jenkins-agent:1.0.0
+    build:
+      context: ./jenkins/agent
+      dockerfile: Dockerfile
+    profiles: ["ci"]
+    environment:
+      JENKINS_URL: http://jenkins:8080/
+      JENKINS_AGENT_NAME: taskflow-docker
+      JENKINS_SECRET: ${JENKINS_AGENT_SECRET:-}
+      JENKINS_WEB_SOCKET: "true"
+      JENKINS_AGENT_WORKDIR: /home/jenkins/agent
+      DOCKER_HOST: tcp://docker:2376
+      DOCKER_CERT_PATH: /certs/client
+      DOCKER_TLS_VERIFY: "1"
+    volumes:
+      - jenkins_agent_work:/home/jenkins/agent
+      - jenkins_docker_certs:/certs/client:ro
+    depends_on:
+      jenkins:
+        condition: service_healthy
+      docker-dind:
+        condition: service_healthy
+    networks:
+      - taskflow
+    restart: unless-stopped
+
+networks:
+  taskflow:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  jenkins_home:
+  jenkins_dind_data:
+  jenkins_docker_certs:
+  jenkins_agent_work:

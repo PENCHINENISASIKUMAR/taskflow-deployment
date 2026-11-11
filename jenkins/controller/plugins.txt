@@ -1,0 +1,9 @@
+workflow-aggregator
+workflow-multibranch
+pipeline-stage-view
+git
+github
+github-branch-source
+credentials-binding
+junit
+timestamper
